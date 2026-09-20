@@ -525,8 +525,9 @@ jobs:
 # ---------------------------------------------------------------------------
 # CodeQL: Rust source
 #
-# Rust is compiled, so manual build mode is used. GitHub recommends manual
-# builds when you need the most precise results for compiled languages.
+# Rust is compiled and GitHub recommends manual builds when you need the most 
+# precise results for compiled languages. However, Rust currently supports only 
+# CodeQL's `none` build mode, so `none` build mode is used.
 # ---------------------------------------------------------------------------
   codeql-rust:
     name: CodeQL Rust security-extended
@@ -620,16 +621,8 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: rust
-          build-mode: manual
+          build-mode: none
           queries: security-extended
-
-      - name: Build for CodeQL
-        shell: bash
-        run: |
-          cargo build \
-            --profile "${BUILD_PROFILE}" \
-            --locked \
-            --target "${TARGET}"
 
       - name: Analyze with CodeQL
         uses: github/codeql-action/analyze@v4
@@ -643,6 +636,7 @@ jobs:
 # ---------------------------------------------------------------------------
   codeql-actions:
     name: CodeQL GitHub Actions security-extended
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     permissions:
