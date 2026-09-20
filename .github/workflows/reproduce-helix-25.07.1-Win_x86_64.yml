@@ -1,0 +1,637 @@
+# This file is AI-generated and is manually reviewed
+name: Reproduce Helix Windows x86_64 Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      helix_tag:
+        description: "Helix release tag"
+        required: true
+        default: "25.07.1"
+      expected_commit:
+        description: "Expected Helix commit prefix for the selected tag"
+        required: true
+        default: "a05c151bb"
+
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  HELIX_REPOSITORY: helix-editor/helix
+  RUST_TOOLCHAIN: "1.88.0"
+  TARGET: x86_64-pc-windows-msvc
+  BUILD_PROFILE: opt
+
+# ---------------------------------------------------------------------------
+# Reproduce the Windows x86_64 release
+# ---------------------------------------------------------------------------
+jobs:
+  reproduce:
+    name: Reproduce Windows x86_64 release
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    env:
+      HELIX_TAG: ${{ inputs.helix_tag }}
+      EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+
+    steps:
+      # ---------------------------------------------------------------------
+      # Checkout exact Helix tag
+      # ---------------------------------------------------------------------
+      - name: Checkout Helix tag
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.HELIX_REPOSITORY }}
+          ref: ${{ env.HELIX_TAG }}
+          fetch-depth: 0
+
+      - name: Verify Helix commit
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          actual="$(git rev-parse HEAD)"
+
+          echo "Expected commit prefix: ${EXPECTED_COMMIT}"
+          echo "Actual commit:          ${actual}"
+
+          case "${actual}" in
+            "${EXPECTED_COMMIT}"*)
+              echo "Commit matches."
+              ;;
+            *)
+              echo "::error::Checked-out commit does not match expected commit."
+              exit 1
+              ;;
+          esac
+
+      # ---------------------------------------------------------------------
+      # Restore the historical grammar snapshot.
+      #
+      # Helix 25.07.1's build scripts fetch grammars at their exact configured
+      # Git revisions. One of those repositories disappeared after release.
+      #
+      # The official Helix source archive was created after the release CI
+      # fetched those grammars, so it contains runtime/grammars/sources/.
+      #
+      # We use that only to restore the historical external build input;
+      # the actual Helix source itself still comes from the signed release tag.
+      # ---------------------------------------------------------------------
+      - name: Download official Helix source archive
+        shell: pwsh
+        run: |
+          $url = "https://github.com/${env:HELIX_REPOSITORY}/releases/download/${env:HELIX_TAG}/helix-${env:HELIX_TAG}-source.tar.xz"
+
+          Write-Host "Downloading:"
+          Write-Host $url
+
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile "helix-official-source.tar.xz"
+
+      - name: Restore historical grammar sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf official-source
+          mkdir official-source
+
+          tar -xJf helix-official-source.tar.xz \
+            -C official-source
+
+          test -d official-source/runtime/grammars/sources
+
+          rm -rf runtime/grammars/sources
+          mkdir -p runtime/grammars
+
+          cp -a \
+            official-source/runtime/grammars/sources \
+            runtime/grammars/sources
+
+          echo "Restored grammar repositories:"
+          find runtime/grammars/sources \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            | wc -l
+
+      # ---------------------------------------------------------------------
+      # The release workflow removed rust-toolchain.toml before installing
+      # "stable".  At the 25.07.1 release date the stable compiler was
+      # Rust 1.88.0, so pin it explicitly instead of following today's
+      # moving "stable" channel.
+      # ---------------------------------------------------------------------
+      - name: Remove rust-toolchain override
+        shell: bash
+        run: |
+          rm -f rust-toolchain.toml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          target: ${{ env.TARGET }}
+
+      - name: Show toolchain
+        shell: bash
+        run: |
+          rustc --version --verbose
+          cargo --version
+          git --version
+          7z --version | head -20
+
+      # ---------------------------------------------------------------------
+      # Security / dependency inventory before the actual release build.
+      #
+      # cargo-audit is intentionally NOT part of this build job.  A historical
+      # release can legitimately have vulnerabilities disclosed after its
+      # release date.  The audit result should be visible without preventing
+      # the binary-reproduction experiment from completing.
+      # ---------------------------------------------------------------------
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: helix-${{ env.HELIX_TAG }}-sbom.cdx.json
+          upload-artifact: false
+          dependency-snapshot: false
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: helix-${{ env.HELIX_TAG }}-sbom
+          path: helix-${{ env.HELIX_TAG }}-sbom.cdx.json
+          if-no-files-found: error
+
+      # ---------------------------------------------------------------------
+      # Exact upstream test command.
+      # ---------------------------------------------------------------------
+      - name: Run Helix workspace tests
+        shell: bash
+        run: |
+          cargo test \
+            --release \
+            --locked \
+            --target "${TARGET}" \
+            --workspace
+
+      # ---------------------------------------------------------------------
+      # Exact upstream release build command.
+      # ---------------------------------------------------------------------
+      - name: Build Helix release binary
+        shell: bash
+        run: |
+          cargo build \
+            --profile "${BUILD_PROFILE}" \
+            --locked \
+            --target "${TARGET}"
+
+      - name: Verify hx.exe
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          HX="target/${TARGET}/${BUILD_PROFILE}/hx.exe"
+
+          test -f "${HX}"
+
+          "${HX}" --version
+
+          sha256sum "${HX}" | tee hx.exe.sha256
+          sha512sum "${HX}" | tee hx.exe.sha512
+
+      # ---------------------------------------------------------------------
+      # Attest the actual executable.
+      #
+      # This attestation belongs to YOUR repository/workflow, not to the
+      # upstream Helix repository. It proves provenance for your rebuilt
+      # artifact.
+      #
+      # The SBOM is attached to the attestation as well.
+      # ---------------------------------------------------------------------
+      - name: Attest rebuilt hx.exe with SBOM
+        uses: actions/attest@v4
+        with:
+          subject-path: target/${{ env.TARGET }}/${{ env.BUILD_PROFILE }}/hx.exe
+          sbom-path: helix-${{ env.HELIX_TAG }}-sbom.cdx.json
+
+      # ---------------------------------------------------------------------
+      # Assemble the same release directory structure used by the official
+      # Helix publish job.
+      # ---------------------------------------------------------------------
+      - name: Assemble release directory
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PKG="helix-${HELIX_TAG}-x86_64-windows"
+
+          rm -rf dist
+          mkdir -p \
+            "dist/${PKG}/contrib"
+
+          cp LICENSE README.md \
+            "dist/${PKG}/"
+
+          cp -r \
+            contrib/completion \
+            "dist/${PKG}/contrib/"
+
+          cp \
+            "target/${TARGET}/${BUILD_PROFILE}/hx.exe" \
+            "dist/${PKG}/"
+
+          # Match the official release packaging: the source repositories
+          # themselves are not included inside the runtime directory.
+          rm -rf runtime/grammars/sources
+
+          cp -r runtime \
+            "dist/${PKG}/"
+
+      # ---------------------------------------------------------------------
+      # Recreate the official Windows archive.
+      #
+      # Note: ZIP metadata can differ even when hx.exe is byte-identical.
+      # Therefore this digest is useful, but hx.exe's digest is the stronger
+      # comparison.
+      # ---------------------------------------------------------------------
+      - name: Create Windows release ZIP
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd dist
+
+          7z a -r \
+            "../helix-${HELIX_TAG}-x86_64-windows.zip" \
+            "helix-${HELIX_TAG}-x86_64-windows"
+
+          cd ..
+
+          sha256sum \
+            "helix-${HELIX_TAG}-x86_64-windows.zip" \
+            | tee helix-${HELIX_TAG}-x86_64-windows.zip.sha256
+
+          sha512sum \
+            "helix-${HELIX_TAG}-x86_64-windows.zip" \
+            | tee helix-${HELIX_TAG}-x86_64-windows.zip.sha512
+
+      # ---------------------------------------------------------------------
+      # Attest the exact ZIP that we will compare with the official release.
+      # ---------------------------------------------------------------------
+      - name: Attest rebuilt Windows release ZIP
+        uses: actions/attest@v4
+        with:
+          subject-path: helix-${{ env.HELIX_TAG }}-x86_64-windows.zip
+
+      # ---------------------------------------------------------------------
+      # Download official release artifact.
+      # ---------------------------------------------------------------------
+      - name: Download official Windows release ZIP
+        shell: pwsh
+        run: |
+          $url = "https://github.com/${env:HELIX_REPOSITORY}/releases/download/${env:HELIX_TAG}/helix-${env:HELIX_TAG}-x86_64-windows.zip"
+
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile "official-helix-${env:HELIX_TAG}-x86_64-windows.zip"
+
+      - name: Hash official ZIP
+        shell: bash
+        run: |
+          sha256sum \
+            "official-helix-${HELIX_TAG}-x86_64-windows.zip" \
+            | tee official.sha256
+
+          sha512sum \
+            "official-helix-${HELIX_TAG}-x86_64-windows.zip" \
+            | tee official.sha512
+
+      # ---------------------------------------------------------------------
+      # ZIP comparison
+      # ---------------------------------------------------------------------
+      - name: Compare release ZIP SHA-256
+        shell: bash
+        run: |
+          ours="$(
+            sha256sum \
+              "helix-${HELIX_TAG}-x86_64-windows.zip" |
+              awk '{print $1}'
+          )"
+
+          official="$(
+            sha256sum \
+              "official-helix-${HELIX_TAG}-x86_64-windows.zip" |
+              awk '{print $1}'
+          )"
+
+          echo "Our ZIP SHA-256:"
+          echo "${ours}"
+          echo
+          echo "Official ZIP SHA-256:"
+          echo "${official}"
+
+          if [[ "${ours}" == "${official}" ]]; then
+            echo "ZIP SHA-256 MATCH"
+          else
+            echo "ZIP SHA-256 DIFFER"
+            echo
+            echo "A ZIP mismatch does not necessarily mean the executable"
+            echo "differs; archive metadata and file ordering may differ."
+          fi
+
+      # ---------------------------------------------------------------------
+      # Extract both packages and compare the actual Windows executable.
+      # ---------------------------------------------------------------------
+      - name: Extract official and rebuilt packages
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf compare-official compare-ours
+
+          mkdir compare-official compare-ours
+
+          7z x \
+            "official-helix-${HELIX_TAG}-x86_64-windows.zip" \
+            -ocompare-official \
+            -y
+
+          7z x \
+            "helix-${HELIX_TAG}-x86_64-windows.zip" \
+            -ocompare-ours \
+            -y
+
+      - name: Compare hx.exe SHA-256
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          official_exe="$(
+            find compare-official \
+              -type f \
+              -name hx.exe \
+              -print -quit
+          )"
+
+          rebuilt_exe="$(
+            find compare-ours \
+              -type f \
+              -name hx.exe \
+              -print -quit
+          )"
+
+          echo "Official hx.exe:"
+          sha256sum "${official_exe}"
+
+          echo
+          echo "Rebuilt hx.exe:"
+          sha256sum "${rebuilt_exe}"
+
+          official_hash="$(
+            sha256sum "${official_exe}" |
+            awk '{print $1}'
+          )"
+
+          rebuilt_hash="$(
+            sha256sum "${rebuilt_exe}" |
+            awk '{print $1}'
+          )"
+
+          if [[ "${official_hash}" == "${rebuilt_hash}" ]]; then
+            echo
+            echo "========================================"
+            echo "hx.exe SHA-256 MATCH"
+            echo "========================================"
+          else
+            echo
+            echo "========================================"
+            echo "hx.exe SHA-256 DIFFER"
+            echo "========================================"
+          fi
+
+      # ---------------------------------------------------------------------
+      # Upload everything useful for independent inspection.
+      # ---------------------------------------------------------------------
+      - name: Upload reproduction artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: helix-${{ env.HELIX_TAG }}-windows-x86_64-reproduction
+          path: |
+            helix-${{ env.HELIX_TAG }}-x86_64-windows.zip
+            helix-${{ env.HELIX_TAG }}-x86_64-windows.zip.sha256
+            helix-${{ env.HELIX_TAG }}-x86_64-windows.zip.sha512
+            official-helix-${{ env.HELIX_TAG }}-x86_64-windows.zip
+            official.sha256
+            official.sha512
+            hx.exe.sha256
+            hx.exe.sha512
+
+# ---------------------------------------------------------------------------
+# RustSec dependency audit
+# ---------------------------------------------------------------------------
+  rustsec-audit:
+    name: RustSec dependency audit
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+
+    env:
+      HELIX_TAG: ${{ inputs.helix_tag }}
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Helix
+        uses: actions/checkout@v6
+        with:
+          repository: helix-editor/helix
+          ref: ${{ env.HELIX_TAG }}
+          fetch-depth: 1
+
+      - name: Remove rust-toolchain override
+        shell: bash
+        run: rm -f rust-toolchain.toml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          target: ${{ env.TARGET }}
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+          checksum: true
+
+      - name: Run RustSec audit
+        shell: bash
+        run: |
+          set +e
+
+          cargo audit \
+            --json \
+            > cargo-audit.json
+
+          status=$?
+
+          cat cargo-audit.json
+
+          exit "${status}"
+
+      - name: Upload cargo-audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: helix-${{ env.HELIX_TAG }}-cargo-audit
+          path: cargo-audit.json
+          if-no-files-found: warn
+
+# ---------------------------------------------------------------------------
+# CodeQL: Rust source
+#
+# Rust is compiled, so manual build mode is used. GitHub recommends manual
+# builds when you need the most precise results for compiled languages.
+# ---------------------------------------------------------------------------
+  codeql-rust:
+    name: CodeQL Rust security-extended
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+
+    env:
+      HELIX_TAG: ${{ inputs.helix_tag }}
+
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+
+    steps:
+      - name: Checkout Helix
+        uses: actions/checkout@v6
+        with:
+          repository: helix-editor/helix
+          ref: ${{ env.HELIX_TAG }}
+          fetch-depth: 1
+
+      - name: Download official source archive for grammar snapshot
+        shell: pwsh
+        run: |
+          $url = "https://github.com/${env:HELIX_REPOSITORY}/releases/download/${env:HELIX_TAG}/helix-${env:HELIX_TAG}-source.tar.xz"
+
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile "helix-official-source.tar.xz"
+
+      - name: Restore historical grammar sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf official-source
+          mkdir official-source
+
+          tar -xJf helix-official-source.tar.xz \
+            -C official-source
+
+          test -d official-source/runtime/grammars/sources
+
+          rm -rf runtime/grammars/sources
+          mkdir -p runtime/grammars
+
+          cp -a \
+            official-source/runtime/grammars/sources \
+            runtime/grammars/sources
+
+      - name: Remove rust-toolchain override
+        shell: bash
+        run: rm -f rust-toolchain.toml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          target: ${{ env.TARGET }}
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: rust
+          build-mode: manual
+          queries: security-extended
+
+      - name: Build for CodeQL
+        shell: bash
+        run: |
+          cargo build \
+            --profile "${BUILD_PROFILE}" \
+            --locked \
+            --target "${TARGET}"
+
+      - name: Analyze with CodeQL
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:rust"
+
+# ---------------------------------------------------------------------------
+# CodeQL: GitHub Actions workflow security
+#
+# This analyzes YOUR wrapper workflow rather than Helix's Rust source.
+# ---------------------------------------------------------------------------
+  codeql-actions:
+    name: CodeQL GitHub Actions security-extended
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+
+    steps:
+      - name: Checkout wrapper repository
+        uses: actions/checkout@v6
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: actions
+          build-mode: none
+          queries: security-extended
+
+      - name: Analyze GitHub Actions
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:actions"
+
+# ---------------------------------------------------------------------------
+# Dependency Review
+#
+# This checks dependency changes in YOUR wrapper repository's PRs.
+# It does not replace cargo-audit for the Helix tag because the Helix source
+# is checked out from an upstream repository during the reproduction job.
+# ---------------------------------------------------------------------------
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: high
