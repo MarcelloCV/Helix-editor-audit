@@ -168,7 +168,7 @@ jobs:
           rustc --version --verbose
           cargo --version
           git --version
-          7z --version | head -20
+          7z -h
 
       # ---------------------------------------------------------------------
       # Security / dependency inventory before the actual release build.
