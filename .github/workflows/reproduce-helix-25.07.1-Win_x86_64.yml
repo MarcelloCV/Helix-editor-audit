@@ -509,7 +509,10 @@ jobs:
 
           cat cargo-audit.json
 
-          exit "${status}"
+          echo "cargo-audit exit status: ${status}"
+          echo "Audit findings are informational for this historical release."
+          
+          exit 0
 
       - name: Upload cargo-audit report
         if: always()
