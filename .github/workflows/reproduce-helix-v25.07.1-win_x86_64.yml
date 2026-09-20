@@ -1,24 +1,15 @@
 # This file is AI-generated and is manually reviewed
-name: Reproduce Helix Windows x86_64 Release
+name: Reproduce Helix v25.07.1 Windows x86_64 Release
 
 on:
   workflow_dispatch:
-    inputs:
-      helix_tag:
-        description: "Helix release tag"
-        required: true
-        default: "25.07.1"
-      expected_commit:
-        description: "Expected Helix commit prefix for the selected tag"
-        required: true
-        default: "a05c151bb"
-
-  pull_request:
 
 permissions:
   contents: read
 
 env:
+  HELIX_TAG: "25.07.1"
+  EXPECTED_COMMIT: "a05c151bb"
   HELIX_REPOSITORY: helix-editor/helix
   RUST_TOOLCHAIN: "1.88.0"
   TARGET: x86_64-pc-windows-msvc
@@ -38,10 +29,6 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
-
-    env:
-      HELIX_TAG: ${{ inputs.helix_tag }}
-      EXPECTED_COMMIT: ${{ inputs.expected_commit }}
 
     steps:
       # ---------------------------------------------------------------------
@@ -466,9 +453,6 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: windows-2022
 
-    env:
-      HELIX_TAG: ${{ inputs.helix_tag }}
-
     permissions:
       contents: read
 
@@ -533,9 +517,6 @@ jobs:
     name: CodeQL Rust security-extended
     if: github.event_name == 'workflow_dispatch'
     runs-on: windows-2022
-
-    env:
-      HELIX_TAG: ${{ inputs.helix_tag }}
 
     permissions:
       contents: read
