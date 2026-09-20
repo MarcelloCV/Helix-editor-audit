@@ -102,28 +102,48 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
+      
           rm -rf official-source
           mkdir official-source
-
-          tar -xJf helix-official-source.tar.xz \
-            -C official-source
-
+      
+          python - <<'PY'
+          import os
+          import tarfile
+      
+          archive = "helix-official-source.tar.xz"
+          destination = os.path.abspath("official-source")
+      
+          with tarfile.open(archive, mode="r:xz") as archive_file:
+              for member in archive_file:
+                  # These dangling links are Unix-specific or point to files omitted from
+                  # the official source archive. They are not needed for the historical 
+                  # grammar snapshot and can not be recreated on Windows.
+                  if member.issym() or member.islnk():
+                      print(f"Skipping link: {member.name}")
+                      continue
+      
+                  member_path = os.path.abspath(
+                      os.path.join(destination, member.name)
+                  )
+      
+                  if os.path.commonpath(
+                      [destination, member_path]
+                  ) != destination:
+                      raise RuntimeError(
+                          f"Archive path escapes destination: {member.name}"
+                      )
+      
+                  archive_file.extract(member, destination)
+          PY
+      
           test -d official-source/runtime/grammars/sources
-
+      
           rm -rf runtime/grammars/sources
           mkdir -p runtime/grammars
-
+      
           cp -a \
             official-source/runtime/grammars/sources \
             runtime/grammars/sources
-
-          echo "Restored grammar repositories:"
-          find runtime/grammars/sources \
-            -mindepth 1 \
-            -maxdepth 1 \
-            -type d \
-            | wc -l
 
       # ---------------------------------------------------------------------
       # The release workflow removed rust-toolchain.toml before installing
@@ -539,21 +559,49 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
+      
           rm -rf official-source
           mkdir official-source
-
-          tar -xJf helix-official-source.tar.xz \
-            -C official-source
-
+      
+          python - <<'PY'
+          import os
+          import tarfile
+      
+          archive = "helix-official-source.tar.xz"
+          destination = os.path.abspath("official-source")
+      
+          with tarfile.open(archive, mode="r:xz") as archive_file:
+              for member in archive_file:
+                  # These dangling links are Unix-specific or point to files omitted from
+                  # the official source archive. They are not needed for the historical 
+                  # grammar snapshot and can not be recreated on Windows.
+                  if member.issym() or member.islnk():
+                      print(f"Skipping link: {member.name}")
+                      continue
+      
+                  member_path = os.path.abspath(
+                      os.path.join(destination, member.name)
+                  )
+      
+                  if os.path.commonpath(
+                      [destination, member_path]
+                  ) != destination:
+                      raise RuntimeError(
+                          f"Archive path escapes destination: {member.name}"
+                      )
+      
+                  archive_file.extract(member, destination)
+          PY
+      
           test -d official-source/runtime/grammars/sources
-
+      
           rm -rf runtime/grammars/sources
           mkdir -p runtime/grammars
-
+      
           cp -a \
             official-source/runtime/grammars/sources \
             runtime/grammars/sources
+            
 
       - name: Remove rust-toolchain override
         shell: bash
