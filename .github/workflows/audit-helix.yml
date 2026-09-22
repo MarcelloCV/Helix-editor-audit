@@ -1,0 +1,169 @@
+# This file is written with the help of AI and is manually modified
+name: Audit Helix source code
+
+on:
+  workflow_dispatch:
+
+permissions: 
+  contents: read
+
+env:
+  TAG: "25.07.1"
+  EXPECTED_COMMIT: "a05c151bb"
+  EXPECTED_SOURCE_DIGEST: "2d0cf264ac77f8c25386a636e2b3a09a23dec555568cc9a5b2927f84322f544e"
+  HELIX_REPO: helix-editor/helix
+  RUST_TOOLCHAIN: "1.88.0"
+  TARGET: x86_64-pc-windows-msvc
+  BUILD_PROFILE: opt
+
+jobs:
+  prepare:
+    name: prepare Helix source code
+    runs-on: ubuntu-latest
+
+    permissions: 
+      contents: read
+      actions: read
+      security-events: write
+      id-token: write
+      artifact-metadata: write
+
+    steps:
+      - name: Resolve release tag
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $repoUrl = "https://github.com/$env:HELIX_REPO.git"
+          $tag = $env:TAG
+
+          $tagRef = git ls-remote `
+              $repoUrl `
+              "refs/tags/$tag"
+              
+          $peeledRef = git ls-remote `
+              $repoUrl `
+              "refs/tags/${tag}^{}"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "git ls-remote failed."
+          }
+            
+          if (-not $tagRef) {
+            throw "Tag '$tag' was not found in $repoUrl."
+          }
+          
+          $tagObjectSha = ($tagRef -split '\s+')[0]
+          
+          if ($peeledRef) {
+            # Annotated tag: the peeled ref points to the commit.
+            $commitSha = ($peeledRef -split '\s+')[0]
+          }
+          else {
+            # Lightweight tag: the tag ref itself points to the commit.
+            $commitSha = $tagObjectSha
+          }
+                    
+          @"
+          Tag                   : $tag
+          Tag object SHA        : $tagObjectSha
+          Expected commit prefix: $env:EXPECTED_COMMIT
+          Actual commit         : $commitSha
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Download official Helix source archive
+        shell: pwsh
+        run: |
+          $url = "https://github.com/${env:HELIX_REPOSITORY}/releases/download/${env:HELIX_TAG}/helix-${env:HELIX_TAG}-source.tar.xz"
+
+          Write-Host "Downloading: $url"
+
+          curl `
+            -Uri $url `
+            -OutFile "helix-source.tar.xz"
+
+          $actualSourceDigest = Get-FileHash "helix-official-source.tar.xz" 
+          @"
+          Expected source digest: $env:EXPECTED_SOURCE_DIGEST
+          Actual source digest  : $actualSourceDigest
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Extract Helix source files
+        shell: pwsh
+        run: |
+          mkdir helix-source
+          tar -xJf helix-source.tar.xz `
+          --strip-components=1 `
+          -C helix-source
+
+      # ---------------------------------------------------------------------------
+      # RustSec dependency audit
+      # A historical release can legitimately have dependencies with vulnerabilities 
+      # disclosed after its release date.
+      # ---------------------------------------------------------------------------
+
+      # removes rust-toolchain.toml to avoid it overriding the stable toolchain used 
+      # at the release date
+      - name: Remove Rust toolchain override
+        shell: pwsh
+        run: rm "rust-toolchain.toml" -Force -ErrorAction SilentlyContinue
+        
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+          checksum: true
+        
+      - name: Run cargo audit
+        shell: pwsh
+        working-directory: helix-source
+        run: |
+          & cargo audit `
+            --json `
+            > cargo-audit.json
+
+          $status = $LASTEXITCODE
+          
+          "
+          # Cargo audit results
+          $(cat cargo-audit.json)
+
+          `cargo audit` exit status: $status
+          **Note:** Audit findings are informational for this historical release.
+          " >> $env:GITHUB_STEP_SUMMARY
+          
+          exit 0
+
+      - name: Upload cargo-audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: helix-${{ env.TAG }}-cargo-audit
+          path: cargo-audit.json
+          if-no-files-found: warn
+
+      # ---------------------------------------------------------------------------
+      # CodeQL: Rust source
+      #
+      # Rust is compiled and GitHub recommends manual builds when we need the most 
+      # precise results for compiled languages. However, Rust currently supports only 
+      # CodeQL's `none` build mode, so `none` build mode is used.
+      # ---------------------------------------------------------------------------
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: rust
+          build-mode: none
+          queries: security-extended
+          source-root: helix-source
+
+      - name: Analyze with CodeQL
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:rust"
