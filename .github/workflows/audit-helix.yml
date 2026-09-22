@@ -74,7 +74,7 @@ jobs:
       - name: Download official Helix source archive
         shell: pwsh
         run: |
-          $url = "https://github.com/${env:HELIX_REPOSITORY}/releases/download/${env:HELIX_TAG}/helix-${env:HELIX_TAG}-source.tar.xz"
+          $url = "https://github.com/${env:HELIX_REPO}/releases/download/${env:TAG}/helix-${env:TAG}-source.tar.xz"
 
           Write-Host "Downloading: $url"
 
