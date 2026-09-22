@@ -78,7 +78,7 @@ jobs:
 
           Write-Host "Downloading: $url"
 
-          curl `
+          Invoke-WebRequest `
             -Uri $url `
             -OutFile "helix-source.tar.xz"
 
@@ -106,7 +106,7 @@ jobs:
       # at the release date
       - name: Remove Rust toolchain override
         shell: pwsh
-        run: rm "rust-toolchain.toml" -Force -ErrorAction SilentlyContinue
+        run: Remove-Item "rust-toolchain.toml" -Force -ErrorAction SilentlyContinue
         
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
