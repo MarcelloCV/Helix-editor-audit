@@ -82,7 +82,7 @@ jobs:
             -Uri $url `
             -OutFile "helix-source.tar.xz"
 
-          $actualSourceDigest = Get-FileHash "helix-official-source.tar.xz" 
+          $actualSourceDigest = Get-FileHash "helix-source.tar.xz" 
           @"
           Expected source digest: $env:EXPECTED_SOURCE_DIGEST
           Actual source digest  : $actualSourceDigest
